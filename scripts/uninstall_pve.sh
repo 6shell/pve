@@ -3,6 +3,13 @@
 # https://github.com/oneclickvirt/pve
 # 2026.03.04
 
+########## 支持的环境变量（用于无交互一键卸载）
+#
+# AUTO_CONFIRM=yes  - 跳过卸载确认提示，直接执行卸载
+#
+# 示例（一键无交互卸载）:
+#   AUTO_CONFIRM=yes bash uninstall_pve.sh
+
 ########## 输出颜色函数
 
 _red() { echo -e "\033[31m\033[01m$@\033[0m"; }
@@ -41,11 +48,15 @@ _red "警告：本脚本将彻底卸载 Proxmox VE 及所有相关配置！"
 _red "All VMs and containers data under /var/lib/vz/ will be DELETED."
 _red "所有位于 /var/lib/vz/ 下的虚拟机和容器数据将被删除。"
 echo ""
-reading "Are you sure you want to uninstall PVE? (Type 'yes' to confirm / 确认卸载请输入 yes): " confirm
-if [ "$confirm" != "yes" ]; then
-    _green "Uninstall cancelled."
-    _green "已取消卸载。"
-    exit 0
+if [[ "${AUTO_CONFIRM^^}" == "YES" ]]; then
+    _yellow "AUTO_CONFIRM=yes, 跳过确认提示，直接执行卸载"
+else
+    reading "Are you sure you want to uninstall PVE? (Type 'yes' to confirm / 确认卸载请输入 yes): " confirm
+    if [ "$confirm" != "yes" ]; then
+        _green "Uninstall cancelled."
+        _green "已取消卸载。"
+        exit 0
+    fi
 fi
 
 echo ""

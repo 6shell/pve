@@ -3,6 +3,21 @@
 # https://github.com/oneclickvirt/pve
 # 2026.02.28
 
+########## 支持的环境变量（用于无交互一键安装）
+#
+# CN=true              - 使用中国镜像源（跳过地区检测询问）
+# CN=false             - 强制不使用中国镜像源
+# WITHOUTCDN=TRUE      - 不使用 CDN 加速
+# FORCE_INSTALL=true   - 跳过系统最低要求检查和所有"是否继续"确认提示
+# USE_PRIVATE_IP=true  - 检测到私有 IPv4 时直接使用该私有 IP 作为 PVE 主 IP
+# USE_PRIVATE_IP=false - 检测到私有 IPv4 时自动通过 API 获取公网 IP
+# USE_MAX_IPV6_SUBNET=true  - SLAAC 场景下使用最大 IPv6 子网范围
+# USE_MAX_IPV6_SUBNET=false - SLAAC 场景下不使用最大 IPv6 子网范围
+# PVE_HOSTNAME=<name>  - 直接设定 PVE 主机名，跳过交互输入（只能包含英文字母和数字）
+#
+# 示例（一键无交互安装）:
+#   CN=true FORCE_INSTALL=true PVE_HOSTNAME=mypve bash install_pve.sh
+
 ########## 预设部分输出和部分中间变量
 
 cd /root >/dev/null 2>&1
@@ -712,6 +727,12 @@ check_china() {
                 ;;
             esac
         fi
+    else
+        if [[ "${CN}" == true ]]; then
+            _yellow "CN=true, 使用中国镜像源"
+        else
+            _yellow "CN=${CN}, 跳过中国镜像检测"
+        fi
     fi
 }
 
@@ -929,11 +950,15 @@ check_system_requirements() {
         echo $?
     ) -ne 0 ]; then
         _red "Error: This system does not meet the minimum requirements for Proxmox VE installation."
-        _yellow "Do you want to continue the installation? (Enter to not continue the installation by default) (y/[n])"
-        reading "是否要继续安装？(回车则默认不继续安装) (y/[n]) " confirm
-        echo ""
-        if [ "$confirm" != "y" ]; then
-            exit 1
+        if [[ "${FORCE_INSTALL^^}" == "TRUE" ]]; then
+            _yellow "FORCE_INSTALL=true, 跳过最低要求检查，强制继续安装"
+        else
+            _yellow "Do you want to continue the installation? (Enter to not continue the installation by default) (y/[n])"
+            reading "是否要继续安装？(回车则默认不继续安装) (y/[n]) " confirm
+            echo ""
+            if [ "$confirm" != "y" ]; then
+                exit 1
+            fi
         fi
     else
         _green "The system meets the minimum requirements for Proxmox VE installation."
@@ -1000,9 +1025,19 @@ collect_ip_info() {
             _green "当前检测到的是私有地址。如果你的宿主机是云服务器/云独立服务器，请选择公网 IPv4 作为 PVE 的主 IP。"
             _green "如果你的宿主机是本地物理机，且没有固定公网 IPv4，可以使用当前私有地址。"
             echo
-            reading "Use the current private IPv4 address as the main PVE IP? (y/n) [Default: n]: " use_private
-            _green "是否使用当前私有 IPv4 地址作为 PVE 的主 IP？(y/n) [默认: n]: "
-            use_private=${use_private:-n}
+            if [[ -n "${USE_PRIVATE_IP}" ]]; then
+                if [[ "${USE_PRIVATE_IP^^}" == "TRUE" ]]; then
+                    use_private="y"
+                    _yellow "USE_PRIVATE_IP=true, 使用私有 IP：$main_ipv4"
+                else
+                    use_private="n"
+                    _yellow "USE_PRIVATE_IP=false, 自动获取公网 IP"
+                fi
+            else
+                reading "Use the current private IPv4 address as the main PVE IP? (y/n) [Default: n]: " use_private
+                _green "是否使用当前私有 IPv4 地址作为 PVE 的主 IP？(y/n) [默认: n]: "
+                use_private=${use_private:-n}
+            fi
             if [[ "$use_private" =~ ^[Yy]$ ]]; then
                 _green "Using private IP: $main_ipv4"
                 _green "使用私有 IP：$main_ipv4"
@@ -1177,8 +1212,18 @@ ask_maximum_subnet() {
     if [ -f /usr/local/bin/pve_slaac_status ] && [ ! -f /usr/local/bin/pve_maximum_subset ] && [ ! -f /usr/local/bin/fix_interfaces_ipv6_auto_type ]; then
         _blue "It is detected that IPV6 addresses are most likely to be dynamically assigned by SLAAC, and if there is no subsequent need to assign separate IPV6 addresses to VMs/containers, the following option is best selected n"
         _green "检测到IPV6地址大概率由SLAAC动态分配，若后续不需要分配独立的IPV6地址给虚拟机/容器，则下面选项最好选 n"
-        _blue "Is the maximum subnet range feasible with IPV6 used?([n]/y)"
-        reading "是否使用IPV6可行的最大子网范围？([n]/y)" select_maximum_subset
+        if [[ -n "${USE_MAX_IPV6_SUBNET}" ]]; then
+            if [[ "${USE_MAX_IPV6_SUBNET^^}" == "TRUE" ]]; then
+                select_maximum_subset="y"
+                _yellow "USE_MAX_IPV6_SUBNET=true, 使用最大 IPv6 子网范围"
+            else
+                select_maximum_subset="n"
+                _yellow "USE_MAX_IPV6_SUBNET=false, 不使用最大 IPv6 子网范围"
+            fi
+        else
+            _blue "Is the maximum subnet range feasible with IPV6 used?([n]/y)"
+            reading "是否使用IPV6可行的最大子网范围？([n]/y)" select_maximum_subset
+        fi
         if [ "$select_maximum_subset" = "y" ] || [ "$select_maximum_subset" = "Y" ]; then
             echo "true" >/usr/local/bin/pve_maximum_subset
         else
@@ -1378,19 +1423,29 @@ setup_cn_dns() {
 setup_hostname() {
     # 获取用户输入的新主机名
     local new_hostname=""
-    while true; do
-        _green "Please enter a new host name (can only contain English letters and numbers, not pure numbers or special characters, enter the default pve):"
-        reading "请输入新的主机名(只能包含英文字母和数字,不能是纯数字或特殊字符,回车默认为pve):" new_hostname
-        if [ -z "$new_hostname" ]; then
-            new_hostname="pve"
-            break
-        elif ! [[ "$new_hostname" =~ ^[a-zA-Z0-9]+$ ]]; then
-            _yellow "The hostname entered can only contain English letters and numbers, please re-enter it."
-            _yellow "输入的主机名只能包含英文字母和数字,请重新输入。"
+    if [[ -n "${PVE_HOSTNAME}" ]]; then
+        if [[ "${PVE_HOSTNAME}" =~ ^[a-zA-Z0-9]+$ ]]; then
+            new_hostname="${PVE_HOSTNAME}"
+            _yellow "PVE_HOSTNAME=${PVE_HOSTNAME}, 使用预设主机名: $new_hostname"
         else
-            break
+            _red "PVE_HOSTNAME=${PVE_HOSTNAME} 包含非法字符（只能包含英文字母和数字），将使用默认值 pve"
+            new_hostname="pve"
         fi
-    done
+    else
+        while true; do
+            _green "Please enter a new host name (can only contain English letters and numbers, not pure numbers or special characters, enter the default pve):"
+            reading "请输入新的主机名(只能包含英文字母和数字,不能是纯数字或特殊字符,回车默认为pve):" new_hostname
+            if [ -z "$new_hostname" ]; then
+                new_hostname="pve"
+                break
+            elif ! [[ "$new_hostname" =~ ^[a-zA-Z0-9]+$ ]]; then
+                _yellow "The hostname entered can only contain English letters and numbers, please re-enter it."
+                _yellow "输入的主机名只能包含英文字母和数字,请重新输入。"
+            else
+                break
+            fi
+        done
+    fi
     # 仅在主机名不同时进行更改
     hostname=$(hostname)
     if [ "${hostname}" != "$new_hostname" ]; then
@@ -1617,6 +1672,10 @@ setup_arm_pve_repo() {
 confirm_continue() {
     local prompt_text="$1"
     local confirm=""
+    if [[ "${FORCE_INSTALL^^}" == "TRUE" ]]; then
+        _yellow "FORCE_INSTALL=true, 跳过确认提示，强制继续"
+        return 0
+    fi
     _yellow "Do you want to continue the installation? (Enter to not continue the installation by default) (y/[n])"
     reading "$prompt_text(回车则默认不继续安装) (y/[n]) " confirm
     echo ""
