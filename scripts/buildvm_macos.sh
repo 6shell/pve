@@ -275,14 +275,9 @@ configure_network() {
 
 setup_port_forwarding() {
     user_ip="172.16.1.${vm_num}"
-    iptables -t nat -A PREROUTING -i vmbr0 -p tcp --dport ${sshn} -j DNAT --to-destination ${user_ip}:22
-    iptables -t nat -A PREROUTING -i vmbr0 -p tcp --dport ${vnc_port} -j DNAT --to-destination ${user_ip}:5900
-    if [ ! -f "/etc/iptables/rules.v4" ]; then
-        touch /etc/iptables/rules.v4
-    fi
-    iptables-save | awk '{if($1=="COMMIT"){delete x}}$1=="-A"?!x[$0]++:1' | iptables-restore
-    iptables-save >/etc/iptables/rules.v4
-    service netfilter-persistent restart
+    _fw_add_dnat "vmbr0" "tcp" "${sshn}" "${user_ip}:22"
+    _fw_add_dnat "vmbr0" "tcp" "${vnc_port}" "${user_ip}:5900"
+    _fw_save
 }
 
 save_vm_info() {

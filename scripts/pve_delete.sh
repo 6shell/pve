@@ -56,21 +56,37 @@ cleanup_ipv6_nat_rules() {
         log "Cleaning up IPv6 NAT rules for VM $vmctid"
         local vm_internal_ipv6="2001:db8:1::${vmctid}"
         local host_external_ipv6=""
-        if [ -f "$rules_file" ]; then
-            host_external_ipv6=$(grep "DNAT --to-destination $vm_internal_ipv6" "$rules_file" | head -1 | grep -oP "(?<=-d )[^ ]+" || true)
+        if command -v nft >/dev/null 2>&1 && nft list tables >/dev/null 2>&1; then
+            # nftables: find and remove matching rules
+            host_external_ipv6=$(nft list chain ip6 nat prerouting 2>/dev/null | grep "dnat to $vm_internal_ipv6" | sed 's/.*ip6 daddr \([^ ]*\).*/\1/' | head -1)
             if [ -n "$host_external_ipv6" ]; then
-                log "Removing IPv6 NAT rules: $vm_internal_ipv6 -> $host_external_ipv6"
-                ip6tables -t nat -D PREROUTING -d "$host_external_ipv6" -j DNAT --to-destination "$vm_internal_ipv6" 2>/dev/null || true
-                ip6tables -t nat -D POSTROUTING -s "$vm_internal_ipv6" -j SNAT --to-source "$host_external_ipv6" 2>/dev/null || true
-                sed -i "/DNAT --to-destination $vm_internal_ipv6/d" "$rules_file" 2>/dev/null || true
-                sed -i "/SNAT --to-source $host_external_ipv6/d" "$rules_file" 2>/dev/null || true
-                if [ -f "$used_ips_file" ]; then
-                    sed -i "/^$host_external_ipv6$/d" "$used_ips_file" 2>/dev/null || true
-                    log "Released IPv6 address: $host_external_ipv6"
-                fi
-                systemctl daemon-reload
-                systemctl restart ipv6nat.service
+                log "Removing nftables IPv6 NAT rules: $vm_internal_ipv6 -> $host_external_ipv6"
+                for chain in prerouting postrouting; do
+                    nft -a list chain ip6 nat $chain 2>/dev/null | grep -E "$vm_internal_ipv6|$host_external_ipv6" | sed 's/.*# handle //' | awk '{print $1}' | while read -r h; do
+                        nft delete rule ip6 nat $chain handle "$h" 2>/dev/null || true
+                    done
+                done
+                printf '#!/usr/sbin/nft -f\nflush ruleset\n' > /etc/nftables.conf
+                nft list ruleset >> /etc/nftables.conf
             fi
+        else
+            # iptables fallback
+            if [ -f "$rules_file" ]; then
+                host_external_ipv6=$(grep "DNAT --to-destination $vm_internal_ipv6" "$rules_file" | head -1 | grep -oP "(?<=-d )[^ ]+" || true)
+                if [ -n "$host_external_ipv6" ]; then
+                    log "Removing iptables IPv6 NAT rules: $vm_internal_ipv6 -> $host_external_ipv6"
+                    ip6tables -t nat -D PREROUTING -d "$host_external_ipv6" -j DNAT --to-destination "$vm_internal_ipv6" 2>/dev/null || true
+                    ip6tables -t nat -D POSTROUTING -s "$vm_internal_ipv6" -j SNAT --to-source "$host_external_ipv6" 2>/dev/null || true
+                    sed -i "/DNAT --to-destination $vm_internal_ipv6/d" "$rules_file" 2>/dev/null || true
+                    sed -i "/SNAT --to-source $host_external_ipv6/d" "$rules_file" 2>/dev/null || true
+                    systemctl daemon-reload
+                    systemctl restart ipv6nat.service 2>/dev/null || true
+                fi
+            fi
+        fi
+        if [ -n "$host_external_ipv6" ] && [ -f "$used_ips_file" ]; then
+            sed -i "/^${host_external_ipv6}$/d" "$used_ips_file" 2>/dev/null || true
+            log "Released IPv6 address: $host_external_ipv6"
         fi
     fi
 }
@@ -135,10 +151,18 @@ handle_vm_deletion() {
     cleanup_ipv6_nat_rules "$vmid"
     # 清理相关文件
     cleanup_vm_files "$vmid"
-    # 更新iptables规则
+    # 更新防火墙规则
     if [ -n "$ip_address" ]; then
-        log "Removing iptables rules for IP $ip_address"
-        sed -i "/$ip_address:/d" /etc/iptables/rules.v4
+        log "Removing firewall rules for IP $ip_address"
+        if command -v nft >/dev/null 2>&1 && nft list tables >/dev/null 2>&1; then
+            for chain in prerouting postrouting; do
+                nft -a list chain ip nat $chain 2>/dev/null | grep "$ip_address" | sed 's/.*# handle //' | awk '{print $1}' | while read -r h; do
+                    nft delete rule ip nat $chain handle "$h" 2>/dev/null || true
+                done
+            done
+        else
+            [ -f /etc/iptables/rules.v4 ] && sed -i "/$ip_address:/d" /etc/iptables/rules.v4
+        fi
     fi
 }
 
@@ -161,10 +185,18 @@ handle_ct_deletion() {
     cleanup_ct_files "$ctid"
     # 清理IPv6 NAT映射规则
     cleanup_ipv6_nat_rules "$ctid"
-    # 更新iptables规则
+    # 更新防火墙规则
     if [ -n "$ip_address" ]; then
-        log "Removing iptables rules for IP $ip_address"
-        sed -i "/$ip_address:/d" /etc/iptables/rules.v4
+        log "Removing firewall rules for IP $ip_address"
+        if command -v nft >/dev/null 2>&1 && nft list tables >/dev/null 2>&1; then
+            for chain in prerouting postrouting; do
+                nft -a list chain ip nat $chain 2>/dev/null | grep "$ip_address" | sed 's/.*# handle //' | awk '{print $1}' | while read -r h; do
+                    nft delete rule ip nat $chain handle "$h" 2>/dev/null || true
+                done
+            done
+        else
+            [ -f /etc/iptables/rules.v4 ] && sed -i "/$ip_address:/d" /etc/iptables/rules.v4
+        fi
     fi
 }
 
@@ -217,12 +249,17 @@ main() {
             log "Warning: ID $id not found in existing VMs or CTs"
         fi
     done
-    # 重建iptables规则
-    log "Rebuilding iptables rules..."
-    if [ -f "/etc/iptables/rules.v4" ]; then
-        cat /etc/iptables/rules.v4 | iptables-restore
+    # 重建防火墙规则
+    log "Rebuilding firewall rules..."
+    if command -v nft >/dev/null 2>&1 && nft list tables >/dev/null 2>&1; then
+        printf '#!/usr/sbin/nft -f\nflush ruleset\n' > /etc/nftables.conf
+        nft list ruleset >> /etc/nftables.conf
     else
-        log "Warning: iptables rules file not found"
+        if [ -f "/etc/iptables/rules.v4" ]; then
+            cat /etc/iptables/rules.v4 | iptables-restore
+        else
+            log "Warning: iptables rules file not found"
+        fi
     fi
     # 重启ndpresponder服务
     if [ -f "/usr/local/bin/ndpresponder" ]; then

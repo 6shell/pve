@@ -84,27 +84,130 @@ get_available_vmbr1_ipv6() {
     return 1
 }
 
+########## Firewall abstraction: nftables preferred, iptables fallback ##########
+
+_use_nft() {
+    command -v nft >/dev/null 2>&1 && nft list tables >/dev/null 2>&1
+}
+
+_nft_init() {
+    # Try to install nftables if not present (one-time attempt)
+    if ! command -v nft >/dev/null 2>&1 && [ ! -f "/tmp/.nft_install_attempted" ]; then
+        touch /tmp/.nft_install_attempted
+        apt-get update -qq 2>/dev/null && apt-get install -y nftables 2>/dev/null || true
+    fi
+    
+    nft add table ip nat 2>/dev/null || true
+    nft 'add chain ip nat prerouting { type nat hook prerouting priority dstnat; policy accept; }' 2>/dev/null || true
+    nft 'add chain ip nat postrouting { type nat hook postrouting priority srcnat; policy accept; }' 2>/dev/null || true
+    nft add table ip6 nat 2>/dev/null || true
+    nft 'add chain ip6 nat prerouting { type nat hook prerouting priority dstnat; policy accept; }' 2>/dev/null || true
+    nft 'add chain ip6 nat postrouting { type nat hook postrouting priority srcnat; policy accept; }' 2>/dev/null || true
+}
+
+_fw_save() {
+    if _use_nft; then
+        printf '#!/usr/sbin/nft -f\nflush ruleset\n' > /etc/nftables.conf
+        nft list ruleset >> /etc/nftables.conf
+        systemctl enable nftables 2>/dev/null || true
+    else
+        mkdir -p /etc/iptables
+        iptables-save | awk '{if($1=="COMMIT"){delete x}}$1=="-A"?!x[$0]++:1' | iptables-restore
+        iptables-save > /etc/iptables/rules.v4
+        if command -v ip6tables-save >/dev/null 2>&1; then
+            ip6tables-save > /etc/iptables/rules.v6 2>/dev/null || true
+        fi
+        service netfilter-persistent restart 2>/dev/null || true
+    fi
+}
+
+_fw_add_dnat() {
+    local iface="$1" proto="$2" dport="$3" dest="$4"
+    if _use_nft; then
+        _nft_init
+        nft add rule ip nat prerouting iifname "$iface" "$proto" dport "$dport" dnat to "$dest"
+    else
+        iptables -t nat -A PREROUTING -i "$iface" -p "$proto" --dport "$dport" -j DNAT --to-destination "$dest"
+    fi
+}
+
+_fw_add_dnat_range() {
+    local iface="$1" proto="$2" dport_range="$3" dest="$4"
+    if _use_nft; then
+        _nft_init
+        nft add rule ip nat prerouting iifname "$iface" "$proto" dport "$dport_range" dnat to "$dest"
+    else
+        local dport_iptables="${dport_range/-/:}"
+        iptables -t nat -A PREROUTING -i "$iface" -p "$proto" -m "$proto" --dport "$dport_iptables" -j DNAT --to-destination "$dest"
+    fi
+}
+
+_fw_add_full_dnat() {
+    local ext_ip="$1" proto="$2" int_ip="$3"
+    if _use_nft; then
+        _nft_init
+        nft add rule ip nat prerouting ip daddr "$ext_ip" meta l4proto "$proto" dnat to "$int_ip"
+    else
+        iptables -t nat -A PREROUTING -d "$ext_ip" -p "$proto" -j DNAT --to-destination "$int_ip"
+    fi
+}
+
+_fw_add_snat() {
+    local src_ip="$1" oif="$2" snat_ip="$3"
+    if _use_nft; then
+        _nft_init
+        nft add rule ip nat postrouting ip saddr "$src_ip" oifname "$oif" snat to "$snat_ip"
+    else
+        iptables -t nat -A POSTROUTING -s "$src_ip" -o "$oif" -j SNAT --to-source "$snat_ip"
+    fi
+}
+
+_fw6_add_dnat() {
+    local dest_ext="$1" dest_int="$2"
+    if _use_nft; then
+        _nft_init
+        nft add rule ip6 nat prerouting ip6 daddr "$dest_ext" dnat to "$dest_int"
+    else
+        ip6tables -t nat -A PREROUTING -d "$dest_ext" -j DNAT --to-destination "$dest_int"
+    fi
+}
+
+_fw6_add_snat() {
+    local src_int="$1" src_ext="$2"
+    if _use_nft; then
+        _nft_init
+        nft add rule ip6 nat postrouting ip6 saddr "$src_int" snat to "$src_ext"
+    else
+        ip6tables -t nat -A POSTROUTING -s "$src_int" -j SNAT --to-source "$src_ext"
+    fi
+}
+
+########## End of firewall abstraction ##########
+
 setup_nat_mapping() {
     local ct_internal_ipv6="$1"
     local host_external_ipv6="$2"
-    local rules_file="/usr/local/bin/ipv6_nat_rules.sh"
-    local service_file="/etc/systemd/system/ipv6nat.service"
-    local rule_id="DNAT -d $host_external_ipv6 -j DNAT --to-destination $ct_internal_ipv6"
-    if [ ! -f "$rules_file" ]; then
-        cat > "$rules_file" << 'EOF'
-#!/bin/bash
-# Auto-generated NAT rule script
-EOF
-        chmod +x "$rules_file"
-    fi
-    if ! grep -q "$host_external_ipv6" "$rules_file"; then
-        ip6tables -t nat -A PREROUTING -d "$host_external_ipv6" -j DNAT --to-destination "$ct_internal_ipv6"
-        ip6tables -t nat -A POSTROUTING -s "$ct_internal_ipv6" -j SNAT --to-source "$host_external_ipv6"
-        echo "ip6tables -t nat -A PREROUTING -d $host_external_ipv6 -j DNAT --to-destination $ct_internal_ipv6" >> "$rules_file"
-        echo "ip6tables -t nat -A POSTROUTING -s $ct_internal_ipv6 -j SNAT --to-source $host_external_ipv6" >> "$rules_file"
-    fi
-    if [ ! -f "$service_file" ]; then
-        cat > "$service_file" << EOF
+    if _use_nft; then
+        if ! nft list chain ip6 nat prerouting 2>/dev/null | grep -q "$host_external_ipv6"; then
+            _fw6_add_dnat "$host_external_ipv6" "$ct_internal_ipv6"
+            _fw6_add_snat "$ct_internal_ipv6" "$host_external_ipv6"
+        fi
+        _fw_save
+    else
+        local rules_file="/usr/local/bin/ipv6_nat_rules.sh"
+        local service_file="/etc/systemd/system/ipv6nat.service"
+        if [ ! -f "$rules_file" ]; then
+            printf '#!/bin/bash\n# Auto-generated NAT rule script\n' > "$rules_file"
+            chmod +x "$rules_file"
+        fi
+        if ! grep -q "$host_external_ipv6" "$rules_file"; then
+            ip6tables -t nat -A PREROUTING -d "$host_external_ipv6" -j DNAT --to-destination "$ct_internal_ipv6"
+            ip6tables -t nat -A POSTROUTING -s "$ct_internal_ipv6" -j SNAT --to-source "$host_external_ipv6"
+            echo "ip6tables -t nat -A PREROUTING -d $host_external_ipv6 -j DNAT --to-destination $ct_internal_ipv6" >> "$rules_file"
+            echo "ip6tables -t nat -A POSTROUTING -s $ct_internal_ipv6 -j SNAT --to-source $host_external_ipv6" >> "$rules_file"
+        fi
+        if [ ! -f "$service_file" ]; then
+            cat > "$service_file" << 'NATEOF'
 [Unit]
 Description=Apply IPv6 NAT rules at boot
 After=network-online.target
@@ -117,13 +220,15 @@ RemainAfterExit=true
 
 [Install]
 WantedBy=multi-user.target
-EOF
-        systemctl daemon-reexec
-        systemctl daemon-reload
-        systemctl enable ipv6nat.service
-    else
-        systemctl daemon-reload
-        systemctl restart ipv6nat.service
+NATEOF
+            systemctl daemon-reexec
+            systemctl daemon-reload
+            systemctl enable ipv6nat.service
+        else
+            systemctl daemon-reload
+            systemctl restart ipv6nat.service
+        fi
+        _fw_save
     fi
 }
 

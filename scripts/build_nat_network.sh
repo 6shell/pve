@@ -670,7 +670,22 @@ configure_vmbr1() {
 
 # 添加带RA接受的vmbr1
 add_vmbr1_with_accept_ra() {
-    cat <<EOF | sudo tee -a /etc/network/interfaces
+    if command -v nft >/dev/null 2>&1 && nft list tables >/dev/null 2>&1; then
+        cat <<EOF | sudo tee -a /etc/network/interfaces
+auto vmbr1
+iface vmbr1 inet static
+    address 172.16.1.1
+    netmask 255.255.255.0
+    bridge_ports none
+    bridge_stp off
+    bridge_fd 0
+    post-up echo 1 > /proc/sys/net/ipv4/ip_forward
+    post-up echo 1 > /proc/sys/net/ipv4/conf/vmbr1/proxy_arp
+
+pre-up echo 2 > /proc/sys/net/ipv6/conf/vmbr0/accept_ra
+EOF
+    else
+        cat <<EOF | sudo tee -a /etc/network/interfaces
 auto vmbr1
 iface vmbr1 inet static
     address 172.16.1.1
@@ -685,11 +700,25 @@ iface vmbr1 inet static
 
 pre-up echo 2 > /proc/sys/net/ipv6/conf/vmbr0/accept_ra
 EOF
+    fi
 }
 
 # 仅添加IPV4配置的vmbr1
 add_vmbr1_ipv4_only() {
-    cat <<EOF | sudo tee -a /etc/network/interfaces
+    if command -v nft >/dev/null 2>&1 && nft list tables >/dev/null 2>&1; then
+        cat <<EOF | sudo tee -a /etc/network/interfaces
+auto vmbr1
+iface vmbr1 inet static
+    address 172.16.1.1
+    netmask 255.255.255.0
+    bridge_ports none
+    bridge_stp off
+    bridge_fd 0
+    post-up echo 1 > /proc/sys/net/ipv4/ip_forward
+    post-up echo 1 > /proc/sys/net/ipv4/conf/vmbr1/proxy_arp
+EOF
+    else
+        cat <<EOF | sudo tee -a /etc/network/interfaces
 auto vmbr1
 iface vmbr1 inet static
     address 172.16.1.1
@@ -702,11 +731,34 @@ iface vmbr1 inet static
     post-up iptables -t nat -A POSTROUTING -s '172.16.1.0/24' -o vmbr0 -j MASQUERADE
     post-down iptables -t nat -D POSTROUTING -s '172.16.1.0/24' -o vmbr0 -j MASQUERADE
 EOF
+    fi
 }
 
 # 添加带IPV6配置的vmbr1
 add_vmbr1_with_ipv6() {
-    cat <<EOF | sudo tee -a /etc/network/interfaces
+    if command -v nft >/dev/null 2>&1 && nft list tables >/dev/null 2>&1; then
+        # nftables: masquerade rules managed by nftables.service, add IPv6 masquerade to nft
+        nft add rule ip6 nat postrouting ip6 saddr 2001:db8:1::/64 oifname "vmbr0" masquerade 2>/dev/null || true
+        printf '#!/usr/sbin/nft -f\nflush ruleset\n' > /etc/nftables.conf
+        nft list ruleset >> /etc/nftables.conf
+        cat <<EOF | sudo tee -a /etc/network/interfaces
+auto vmbr1
+iface vmbr1 inet static
+    address 172.16.1.1
+    netmask 255.255.255.0
+    bridge_ports none
+    bridge_stp off
+    bridge_fd 0
+    post-up echo 1 > /proc/sys/net/ipv4/ip_forward
+    post-up echo 1 > /proc/sys/net/ipv4/conf/vmbr1/proxy_arp
+
+iface vmbr1 inet6 static
+    address 2001:db8:1::1/64
+    post-up sysctl -w net.ipv6.conf.all.forwarding=1
+    post-down sysctl -w net.ipv6.conf.all.forwarding=0
+EOF
+    else
+        cat <<EOF | sudo tee -a /etc/network/interfaces
 auto vmbr1
 iface vmbr1 inet static
     address 172.16.1.1
@@ -726,6 +778,7 @@ iface vmbr1 inet6 static
     post-down sysctl -w net.ipv6.conf.all.forwarding=0
     post-down ip6tables -t nat -D POSTROUTING -s 2001:db8:1::/64 -o vmbr0 -j MASQUERADE
 EOF
+    fi
 }
 
 # 配置vmbr2网桥（如果需要）
@@ -821,10 +874,38 @@ configure_ipv6_forwarding() {
     update_sysctl "net.ipv6.conf.vmbr2.proxy_ndp=1"
 }
 
-# 安装并配置IPtables
-setup_iptables() {
-    apt-get install -y iptables iptables-persistent
-    iptables -t nat -A POSTROUTING -j MASQUERADE
+# 安装并配置防火墙
+setup_firewall() {
+    # 优先尝试安装 nftables（Debian 10+ 默认）
+    if ! command -v nft >/dev/null 2>&1; then
+        _green "Attempting to install nftables..."
+        _green "尝试安装 nftables..."
+        apt-get install -y nftables 2>/dev/null || {
+            _yellow "Failed to install nftables, will use iptables instead"
+            _yellow "nftables 安装失败，将使用 iptables"
+        }
+    fi
+    
+    # 检测 nftables 是否可用
+    if command -v nft >/dev/null 2>&1 && nft list tables >/dev/null 2>&1; then
+        _green "Using nftables for firewall management"
+        _green "使用 nftables 进行防火墙管理"
+        nft add table ip nat 2>/dev/null || true
+        nft 'add chain ip nat prerouting { type nat hook prerouting priority dstnat; policy accept; }' 2>/dev/null || true
+        nft 'add chain ip nat postrouting { type nat hook postrouting priority srcnat; policy accept; }' 2>/dev/null || true
+        nft add rule ip nat postrouting ip saddr 172.16.1.0/24 oifname "vmbr0" masquerade
+        nft add table ip6 nat 2>/dev/null || true
+        nft 'add chain ip6 nat prerouting { type nat hook prerouting priority dstnat; policy accept; }' 2>/dev/null || true
+        nft 'add chain ip6 nat postrouting { type nat hook postrouting priority srcnat; policy accept; }' 2>/dev/null || true
+        printf '#!/usr/sbin/nft -f\nflush ruleset\n' > /etc/nftables.conf
+        nft list ruleset >> /etc/nftables.conf
+        systemctl enable nftables 2>/dev/null || true
+    else
+        _green "nftables not available, using iptables with iptables-persistent"
+        _green "nftables 不可用，使用 iptables 和 iptables-persistent"
+        apt-get install -y iptables iptables-persistent
+        iptables -t nat -A POSTROUTING -s '172.16.1.0/24' -o vmbr0 -j MASQUERADE
+    fi
     update_sysctl "net.ipv4.ip_forward=1"
     ${sysctl_path} -p
 }
@@ -834,7 +915,12 @@ restart_network_services() {
     systemctl restart networking.service
     sleep 3
     ifreload -ad
-    iptables-save | awk '{if($1=="COMMIT"){delete x}}$1=="-A"?!x[$0]++:1' | iptables-restore
+    if command -v nft >/dev/null 2>&1 && nft list tables >/dev/null 2>&1; then
+        printf '#!/usr/sbin/nft -f\nflush ruleset\n' > /etc/nftables.conf
+        nft list ruleset >> /etc/nftables.conf
+    else
+        iptables-save | awk '{if($1=="COMMIT"){delete x}}$1=="-A"?!x[$0]++:1' | iptables-restore
+    fi
 }
 
 setup_ndpresponder() {
@@ -921,7 +1007,7 @@ configure_vmbr1
 configure_vmbr2
 chattr +i /etc/network/interfaces
 rm -rf /usr/local/bin/iface_auto.txt
-setup_iptables
+setup_firewall
 restart_network_services
 setup_ndpresponder
 backup_and_clean_interfaces

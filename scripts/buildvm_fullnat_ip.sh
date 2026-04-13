@@ -256,16 +256,10 @@ configure_network() {
 }
 
 setup_firewall() {
-    iptables -t nat -A PREROUTING -d $extranet_ipv4 -p tcp -j DNAT --to-destination $user_ip
-    iptables -t nat -A PREROUTING -d $extranet_ipv4 -p udp -j DNAT --to-destination $user_ip
-    iptables -t nat -A POSTROUTING -s $user_ip -o vmbr0 -j SNAT --to-source $extranet_ipv4
-
-    if [ ! -f "/etc/iptables/rules.v4" ]; then
-        touch /etc/iptables/rules.v4
-    fi
-    iptables-save | awk '{if($1=="COMMIT"){delete x}}$1=="-A"?!x[$0]++:1' | iptables-restore
-    iptables-save >/etc/iptables/rules.v4
-    service netfilter-persistent restart
+    _fw_add_full_dnat "$extranet_ipv4" "tcp" "$user_ip"
+    _fw_add_full_dnat "$extranet_ipv4" "udp" "$user_ip"
+    _fw_add_snat "$user_ip" "vmbr0" "$extranet_ipv4"
+    _fw_save
 }
 
 record_vm_info() {

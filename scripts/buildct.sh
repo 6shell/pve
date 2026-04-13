@@ -256,23 +256,18 @@ configure_container_extras() {
 }
 
 setup_port_forwarding() {
-    iptables -t nat -A PREROUTING -i vmbr0 -p tcp --dport ${sshn} -j DNAT --to-destination ${user_ip}:22
+    _fw_add_dnat "vmbr0" "tcp" "${sshn}" "${user_ip}:22"
     if [ "${web1_port}" -ne 0 ]; then
-        iptables -t nat -A PREROUTING -i vmbr0 -p tcp -m tcp --dport ${web1_port} -j DNAT --to-destination ${user_ip}:80
+        _fw_add_dnat "vmbr0" "tcp" "${web1_port}" "${user_ip}:80"
     fi
     if [ "${web2_port}" -ne 0 ]; then
-        iptables -t nat -A PREROUTING -i vmbr0 -p tcp -m tcp --dport ${web2_port} -j DNAT --to-destination ${user_ip}:443
+        _fw_add_dnat "vmbr0" "tcp" "${web2_port}" "${user_ip}:443"
     fi
     if [ "${port_first}" -ne 0 ] && [ "${port_last}" -ne 0 ]; then
-        iptables -t nat -A PREROUTING -i vmbr0 -p tcp -m tcp --dport ${port_first}:${port_last} -j DNAT --to-destination ${user_ip}:${port_first}-${port_last}
-        iptables -t nat -A PREROUTING -i vmbr0 -p udp -m udp --dport ${port_first}:${port_last} -j DNAT --to-destination ${user_ip}:${port_first}-${port_last}
+        _fw_add_dnat_range "vmbr0" "tcp" "${port_first}-${port_last}" "${user_ip}:${port_first}-${port_last}"
+        _fw_add_dnat_range "vmbr0" "udp" "${port_first}-${port_last}" "${user_ip}:${port_first}-${port_last}"
     fi
-    if [ ! -f "/etc/iptables/rules.v4" ]; then
-        touch /etc/iptables/rules.v4
-    fi
-    iptables-save | awk '{if($1=="COMMIT"){delete x}}$1=="-A"?!x[$0]++:1' | iptables-restore
-    iptables-save >/etc/iptables/rules.v4
-    service netfilter-persistent restart
+    _fw_save
 }
 
 save_container_info() {
