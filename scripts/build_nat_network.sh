@@ -681,6 +681,7 @@ iface vmbr1 inet static
     bridge_fd 0
     post-up echo 1 > /proc/sys/net/ipv4/ip_forward
     post-up echo 1 > /proc/sys/net/ipv4/conf/vmbr1/proxy_arp
+    post-up nft -f /etc/nftables.conf 2>/dev/null || true
 
 pre-up echo 2 > /proc/sys/net/ipv6/conf/vmbr0/accept_ra
 EOF
@@ -716,6 +717,7 @@ iface vmbr1 inet static
     bridge_fd 0
     post-up echo 1 > /proc/sys/net/ipv4/ip_forward
     post-up echo 1 > /proc/sys/net/ipv4/conf/vmbr1/proxy_arp
+    post-up nft -f /etc/nftables.conf 2>/dev/null || true
 EOF
     else
         cat <<EOF | sudo tee -a /etc/network/interfaces
@@ -751,6 +753,7 @@ iface vmbr1 inet static
     bridge_fd 0
     post-up echo 1 > /proc/sys/net/ipv4/ip_forward
     post-up echo 1 > /proc/sys/net/ipv4/conf/vmbr1/proxy_arp
+    post-up nft -f /etc/nftables.conf 2>/dev/null || true
 
 iface vmbr1 inet6 static
     address 2001:db8:1::1/64
