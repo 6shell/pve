@@ -66,6 +66,10 @@ cleanup_ipv6_nat_rules() {
                         nft delete rule ip6 nat $chain handle "$h" 2>/dev/null || true
                     done
                 done
+                # 同时清除该隙道IPv6地址的ICMPv6 ping屏蔽规则
+                nft -a list chain ip6 raw prerouting 2>/dev/null | grep "$host_external_ipv6" | sed 's/.*# handle //' | awk '{print $1}' | while read -r h; do
+                    nft delete rule ip6 raw prerouting handle "$h" 2>/dev/null || true
+                done
                 printf '#!/usr/sbin/nft -f\nflush ruleset\n' > /etc/nftables.conf
                 nft list ruleset >> /etc/nftables.conf
             fi
@@ -79,6 +83,7 @@ cleanup_ipv6_nat_rules() {
                     ip6tables -t nat -D POSTROUTING -s "$vm_internal_ipv6" -j SNAT --to-source "$host_external_ipv6" 2>/dev/null || true
                     sed -i "/DNAT --to-destination $vm_internal_ipv6/d" "$rules_file" 2>/dev/null || true
                     sed -i "/SNAT --to-source $host_external_ipv6/d" "$rules_file" 2>/dev/null || true
+
                     systemctl daemon-reload
                     systemctl restart ipv6nat.service 2>/dev/null || true
                 fi
@@ -87,6 +92,37 @@ cleanup_ipv6_nat_rules() {
         if [ -n "$host_external_ipv6" ] && [ -f "$used_ips_file" ]; then
             sed -i "/^${host_external_ipv6}$/d" "$used_ips_file" 2>/dev/null || true
             log "Released IPv6 address: $host_external_ipv6"
+        fi
+    fi
+}
+
+# 清理vmbr2直接分配IPv6（HE隧道/原生子网）模式的ICMPv6 ping屏蔽规则
+cleanup_vmbr2_icmpv6_rule() {
+    local vmctid=$1
+    if [ ! -f /usr/local/bin/pve_check_ipv6 ]; then
+        return 0
+    fi
+    local host_ipv6
+    host_ipv6=$(cat /usr/local/bin/pve_check_ipv6)
+    local ipv6_addr="${host_ipv6%:*}:${vmctid}"
+    log "Cleaning up ICMPv6 ping block rule for $ipv6_addr"
+    if command -v nft >/dev/null 2>&1 && nft list tables >/dev/null 2>&1; then
+        nft -a list chain ip6 raw prerouting 2>/dev/null | grep "$ipv6_addr" | sed 's/.*# handle //' | awk '{print $1}' | while read -r h; do
+            nft delete rule ip6 raw prerouting handle "$h" 2>/dev/null || true
+        done
+        printf '#!/usr/sbin/nft -f\nflush ruleset\n' > /etc/nftables.conf
+        nft list ruleset >> /etc/nftables.conf
+    else
+        local ipv6_prefixlen_del=""
+        [ -f /usr/local/bin/pve_ipv6_prefixlen ] && ipv6_prefixlen_del=$(cat /usr/local/bin/pve_ipv6_prefixlen)
+        if [ -n "$ipv6_prefixlen_del" ]; then
+            local local_prefix_del="${host_ipv6%:*}:/${ipv6_prefixlen_del}"
+            ip6tables -t raw -D PREROUTING -d "$ipv6_addr" -s "$local_prefix_del" -p icmpv6 --icmpv6-type echo-request -j ACCEPT 2>/dev/null || true
+            ip6tables -t raw -D PREROUTING -d "$ipv6_addr" -s fe80::/10 -p icmpv6 --icmpv6-type echo-request -j ACCEPT 2>/dev/null || true
+        fi
+        ip6tables -t raw -D PREROUTING -d "$ipv6_addr" -p icmpv6 --icmpv6-type echo-request -j DROP 2>/dev/null || true
+        if command -v ip6tables-save >/dev/null 2>&1; then
+            ip6tables-save > /etc/iptables/rules.v6 2>/dev/null || true
         fi
     fi
 }
@@ -149,6 +185,8 @@ handle_vm_deletion() {
     qm destroy "$vmid"
     # 清理IPv6 NAT映射规则
     cleanup_ipv6_nat_rules "$vmid"
+    # 清理vmbr2模式 ICMPv6 屏蔽规则
+    cleanup_vmbr2_icmpv6_rule "$vmid"
     # 清理相关文件
     cleanup_vm_files "$vmid"
     # 更新防火墙规则
@@ -185,6 +223,8 @@ handle_ct_deletion() {
     cleanup_ct_files "$ctid"
     # 清理IPv6 NAT映射规则
     cleanup_ipv6_nat_rules "$ctid"
+    # 清理vmbr2模式 ICMPv6 屏蔽规则
+    cleanup_vmbr2_icmpv6_rule "$ctid"
     # 更新防火墙规则
     if [ -n "$ip_address" ]; then
         log "Removing firewall rules for IP $ip_address"

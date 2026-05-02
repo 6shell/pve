@@ -251,6 +251,8 @@ create_container() {
         echo "Container configured with vmbr2: ${ipv6_address_without_last_segment}${CTID}"
         echo "容器已配置使用vmbr2：${ipv6_address_without_last_segment}${CTID}"
         ct_external_ipv6="${ipv6_address_without_last_segment}${CTID}"
+        _fw6_drop_icmpv6_ping "${ipv6_address_without_last_segment}${CTID}" "${ipv6_prefixlen:+${ipv6_address_without_last_segment}/${ipv6_prefixlen}}"
+        _fw_save
     fi
     sleep 3
 }

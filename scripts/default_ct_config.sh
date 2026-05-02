@@ -186,6 +186,14 @@ _nft_init() {
     nft add table ip6 nat 2>/dev/null || true
     nft 'add chain ip6 nat prerouting { type nat hook prerouting priority dstnat; policy accept; }' 2>/dev/null || true
     nft 'add chain ip6 nat postrouting { type nat hook postrouting priority srcnat; policy accept; }' 2>/dev/null || true
+    nft add table ip6 raw 2>/dev/null || true
+    nft 'add chain ip6 raw prerouting { type filter hook prerouting priority raw; policy accept; }' 2>/dev/null || true
+}
+
+_ip6tables_ensure_modules() {
+    modprobe ip6table_nat 2>/dev/null || true
+    modprobe ip6table_raw 2>/dev/null || true
+    modprobe nf_nat 2>/dev/null || true
 }
 
 _fw_save() {
@@ -251,6 +259,7 @@ _fw6_add_dnat() {
         _nft_init
         nft add rule ip6 nat prerouting ip6 daddr "$dest_ext" dnat to "$dest_int"
     else
+        _ip6tables_ensure_modules
         ip6tables -t nat -A PREROUTING -d "$dest_ext" -j DNAT --to-destination "$dest_int"
     fi
 }
@@ -261,7 +270,36 @@ _fw6_add_snat() {
         _nft_init
         nft add rule ip6 nat postrouting ip6 saddr "$src_int" snat to "$src_ext"
     else
+        _ip6tables_ensure_modules
         ip6tables -t nat -A POSTROUTING -s "$src_int" -j SNAT --to-source "$src_ext"
+    fi
+}
+
+_fw6_drop_icmpv6_ping() {
+    local dest_ext="$1"
+    local local_prefix="${2:-}"
+    if _use_nft; then
+        _nft_init
+        if ! nft list chain ip6 raw prerouting 2>/dev/null | grep -q "$dest_ext"; then
+            if [ -n "$local_prefix" ]; then
+                nft add rule ip6 raw prerouting ip6 daddr "$dest_ext" ip6 saddr "$local_prefix" icmpv6 type echo-request accept
+                nft add rule ip6 raw prerouting ip6 daddr "$dest_ext" ip6 saddr fe80::/10 icmpv6 type echo-request accept
+            fi
+            nft add rule ip6 raw prerouting ip6 daddr "$dest_ext" icmpv6 type echo-request drop
+        fi
+    else
+        _ip6tables_ensure_modules
+        if [ -n "$local_prefix" ]; then
+            if ! ip6tables -t raw -C PREROUTING -d "$dest_ext" -s "$local_prefix" -p icmpv6 --icmpv6-type echo-request -j ACCEPT 2>/dev/null; then
+                ip6tables -t raw -A PREROUTING -d "$dest_ext" -s "$local_prefix" -p icmpv6 --icmpv6-type echo-request -j ACCEPT
+            fi
+            if ! ip6tables -t raw -C PREROUTING -d "$dest_ext" -s fe80::/10 -p icmpv6 --icmpv6-type echo-request -j ACCEPT 2>/dev/null; then
+                ip6tables -t raw -A PREROUTING -d "$dest_ext" -s fe80::/10 -p icmpv6 --icmpv6-type echo-request -j ACCEPT
+            fi
+        fi
+        if ! ip6tables -t raw -C PREROUTING -d "$dest_ext" -p icmpv6 --icmpv6-type echo-request -j DROP 2>/dev/null; then
+            ip6tables -t raw -A PREROUTING -d "$dest_ext" -p icmpv6 --icmpv6-type echo-request -j DROP
+        fi
     fi
 }
 
@@ -280,7 +318,7 @@ setup_nat_mapping() {
         local rules_file="/usr/local/bin/ipv6_nat_rules.sh"
         local service_file="/etc/systemd/system/ipv6nat.service"
         if [ ! -f "$rules_file" ]; then
-            printf '#!/bin/bash\n# Auto-generated NAT rule script\n' > "$rules_file"
+            printf '#!/bin/bash\n# Auto-generated NAT rule script\nmodprobe ip6table_nat 2>/dev/null || true\nmodprobe ip6table_raw 2>/dev/null || true\nmodprobe nf_nat 2>/dev/null || true\n' > "$rules_file"
             chmod +x "$rules_file"
         fi
         if ! grep -q "$host_external_ipv6" "$rules_file"; then

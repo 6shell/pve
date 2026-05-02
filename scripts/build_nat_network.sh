@@ -907,6 +907,9 @@ setup_firewall() {
         _green "nftables not available, using iptables with iptables-persistent"
         _green "nftables 不可用，使用 iptables 和 iptables-persistent"
         apt-get install -y iptables iptables-persistent
+        modprobe ip6table_nat 2>/dev/null || true
+        modprobe ip6table_raw 2>/dev/null || true
+        modprobe nf_nat 2>/dev/null || true
         iptables -t nat -A POSTROUTING -s '172.16.1.0/24' -o vmbr0 -j MASQUERADE
     fi
     update_sysctl "net.ipv4.ip_forward=1"

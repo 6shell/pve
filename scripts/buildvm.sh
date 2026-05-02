@@ -196,6 +196,8 @@ configure_network() {
                 qm set $vm_num --ipconfig1 ip6="${ipv6_address_without_last_segment}${vm_num}/128",gw6="${host_ipv6_address}"
                 vm_external_ipv6="${ipv6_address_without_last_segment}${vm_num}"
                 independent_ipv6_status="Y"
+                _fw6_drop_icmpv6_ping "${ipv6_address_without_last_segment}${vm_num}" "${ipv6_prefixlen:+${ipv6_address_without_last_segment}/${ipv6_prefixlen}}"
+                _fw_save
             else
                 independent_ipv6_status="N"
             fi

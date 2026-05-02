@@ -134,6 +134,8 @@ configure_networking() {
                 pct set $CTID --searchdomain local
                 ct_external_ipv6="${ipv6_address_without_last_segment}${CTID}"
                 independent_ipv6_status="Y"
+                _fw6_drop_icmpv6_ping "${ipv6_address_without_last_segment}${CTID}" "${ipv6_prefixlen:+${ipv6_address_without_last_segment}/${ipv6_prefixlen}}"
+                _fw_save
             fi
         fi
     fi
