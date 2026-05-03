@@ -144,6 +144,12 @@ cleanup_vm_files() {
         done
     done
     rm -rf "/root/vm${vmid}"
+    # 清理 macOS VM 专属 opencore ISO（由 buildvm_macos.sh 的 SMBIOS 注入流程生成）
+    local opencore_iso="/var/lib/vz/template/iso/opencore_${vmid}.iso"
+    if [ -f "$opencore_iso" ]; then
+        log "Removing per-VM opencore ISO: $opencore_iso"
+        rm -f "$opencore_iso"
+    fi
 }
 
 # 清理CT相关文件

@@ -227,7 +227,10 @@ create_vm() {
             fi
         fi
     fi
-    qm set $vm_num --ide0 ${storage}:iso/opencore.iso,media=cdrom,cache=unsafe
+    # 使用专属 opencore ISO（含独立SMBIOS）；若生成失败则回退到共享 opencore.iso
+    local opencore_iso_name
+    opencore_iso_name=$(basename "${MACOS_OPENCORE_ISO:-/var/lib/vz/template/iso/opencore.iso}")
+    qm set $vm_num --ide0 ${storage}:iso/${opencore_iso_name},media=cdrom,cache=unsafe
     qm set $vm_num --ide1 ${storage}:iso/${system}.iso,media=cdrom,cache=unsafe
     if [[ "$system" == "high-sierra" || "$system" == "mojave" ]]; then
         grep -q '^boot:' /etc/pve/qemu-server/${vm_num}.conf &&
@@ -297,10 +300,225 @@ save_vm_info() {
         echo ""
     done >"/tmp/temp${vm_num}.txt"
     sed -i 's/^/# /' "/tmp/temp${vm_num}.txt"
+    # 将生成的SMBIOS信息写入VM配置注释，方便追踪
+    if [ -n "$MACOS_SERIAL" ]; then
+        printf '# macOS-SMBIOS: Serial=%s MLB=%s UUID=%s\n#\n' \
+            "$MACOS_SERIAL" "$MACOS_MLB" "$MACOS_UUID" >>"/tmp/temp${vm_num}.txt"
+    fi
     cat "/etc/pve/qemu-server/${vm_num}.conf" >>"/tmp/temp${vm_num}.txt"
     cp "/tmp/temp${vm_num}.txt" "/etc/pve/qemu-server/${vm_num}.conf"
     rm -rf "/tmp/temp${vm_num}.txt"
     cat "vm${vm_num}"
+}
+
+# =============================================
+# macOS SMBIOS 序列号生成与注入
+# 参考: https://github.com/corpnewt/GenSMBIOS
+#       https://github.com/luchina-gabriel/OSX-PROXMOX
+# =============================================
+
+# 全局变量：由 setup_macos_smbios 填充，失败时保持为空
+MACOS_SERIAL=""
+MACOS_MLB=""
+MACOS_UUID=""
+MACOS_OPENCORE_ISO=""
+
+# 生成苹果格式的系统序列号（12位，非元音字符集）
+# 格式: 工厂前缀(3) + 年份/周码(2) + 流水线(3) + 型号标识(4)
+generate_mac_serial() {
+    local charset="BCDFGHJKLMNPQRSTVWXYZ0123456789"
+    local len=${#charset}
+    local prefixes=("C02" "C07" "C3Q" "C1N" "C17" "D25" "FK1")
+    local prefix="${prefixes[$((RANDOM % ${#prefixes[@]}))]}"
+    local serial="$prefix"
+    local i
+    for ((i = 0; i < 9; i++)); do
+        serial="${serial}${charset:$((RANDOM % len)):1}"
+    done
+    echo "$serial"
+}
+
+# 生成主板序列号（MLB，17位）
+generate_mlb() {
+    local charset="BCDFGHJKLMNPQRSTVWXYZ0123456789"
+    local len=${#charset}
+    local prefixes=("C02" "C07" "C3Q" "C1N" "C17")
+    local prefix="${prefixes[$((RANDOM % ${#prefixes[@]}))]}"
+    local mlb="$prefix"
+    local i
+    for ((i = 0; i < 14; i++)); do
+        mlb="${mlb}${charset:$((RANDOM % len)):1}"
+    done
+    echo "$mlb"
+}
+
+# 生成系统 UUID（标准格式）
+generate_system_uuid() {
+    local uuid=""
+    if command -v uuidgen >/dev/null 2>&1; then
+        uuid=$(uuidgen | tr 'a-f' 'A-F')
+    elif [ -f /proc/sys/kernel/random/uuid ]; then
+        uuid=$(tr 'a-z' 'A-Z' </proc/sys/kernel/random/uuid)
+    elif command -v python3 >/dev/null 2>&1; then
+        uuid=$(python3 -c "import uuid; print(str(uuid.uuid4()).upper())" 2>/dev/null)
+    fi
+    if [ -z "$uuid" ]; then
+        uuid="00000000-0000-0000-0000-000000000000"
+        _yellow "uuid生成工具不可用，使用占位UUID"
+    fi
+    echo "$uuid"
+}
+
+# 创建一份 per-VM 的 opencore ISO 副本并将生成的 SMBIOS 注入 config.plist
+# 参数: vm_id  serial  mlb  uuid
+# 成功返回0，失败返回1（调用方回退到原始 opencore.iso）
+patch_opencore_iso() {
+    local vm_id="$1" serial="$2" mlb="$3" uuid="$4"
+    local src_iso="/var/lib/vz/template/iso/opencore.iso"
+    local dst_iso="/var/lib/vz/template/iso/opencore_${vm_id}.iso"
+    local loop_dev="" mount_point="/tmp/opencore_mnt_${vm_id}"
+    local mounted=false ret=0
+
+    # 前置检查
+    [ -f "$src_iso" ] || { _yellow "源 opencore.iso 不存在，跳过 SMBIOS 注入"; return 1; }
+    command -v python3 >/dev/null 2>&1 || { _yellow "python3 不可用，跳过 SMBIOS 注入"; return 1; }
+
+    _yellow "正在为 VM ${vm_id} 创建专属 opencore ISO..."
+    cp "$src_iso" "$dst_iso" 2>/dev/null || { _red "复制 opencore.iso 失败"; return 1; }
+
+    # 清理旧挂载点
+    umount "$mount_point" 2>/dev/null || true
+    rm -rf "$mount_point"
+    mkdir -p "$mount_point"
+
+    # ── 挂载策略1：losetup -P（适用于带分区表的混合磁盘镜像）──
+    loop_dev=$(losetup -f 2>/dev/null)
+    if [ -n "$loop_dev" ] && losetup -P "$loop_dev" "$dst_iso" 2>/dev/null; then
+        sleep 1  # 等待内核扫描分区设备
+        local efi_part="${loop_dev}p1"
+        if [ -b "$efi_part" ]; then
+            if mount -t vfat "$efi_part" "$mount_point" 2>/dev/null ||
+                mount "$efi_part" "$mount_point" 2>/dev/null; then
+                mounted=true
+            fi
+        fi
+        # 分区挂载失败时，尝试直接挂载整个循环设备（纯 FAT32 镜像）
+        if [ "$mounted" = false ]; then
+            if mount -t vfat "$loop_dev" "$mount_point" 2>/dev/null ||
+                mount "$loop_dev" "$mount_point" 2>/dev/null; then
+                mounted=true
+            fi
+        fi
+        if [ "$mounted" = false ]; then
+            losetup -d "$loop_dev" 2>/dev/null
+            loop_dev=""
+        fi
+    else
+        [ -n "$loop_dev" ] && losetup -d "$loop_dev" 2>/dev/null
+        loop_dev=""
+    fi
+
+    # ── 挂载策略2：直接 loop 挂载（FAT32 裸镜像或 ISO9660 只读降级）──
+    if [ "$mounted" = false ]; then
+        if mount -o loop "$dst_iso" "$mount_point" 2>/dev/null; then
+            mounted=true
+        fi
+    fi
+
+    if [ "$mounted" = false ]; then
+        _yellow "无法挂载 opencore ISO，跳过 SMBIOS 注入"
+        [ -n "$loop_dev" ] && losetup -d "$loop_dev" 2>/dev/null
+        rmdir "$mount_point" 2>/dev/null
+        rm -f "$dst_iso"
+        return 1
+    fi
+
+    # 查找 config.plist（通常在 EFI/OC/config.plist）
+    local config_plist
+    config_plist=$(find "$mount_point" -name "config.plist" 2>/dev/null | head -1)
+    if [ -z "$config_plist" ]; then
+        _yellow "在 opencore ISO 中未找到 config.plist，跳过 SMBIOS 注入"
+        umount "$mount_point" 2>/dev/null
+        [ -n "$loop_dev" ] && losetup -d "$loop_dev" 2>/dev/null
+        rmdir "$mount_point" 2>/dev/null
+        rm -f "$dst_iso"
+        return 1
+    fi
+
+    _yellow "找到 config.plist: $config_plist"
+
+    # 使用 python3 plistlib 修改 PlatformInfo/Generic 节点
+    # 参数通过命令行传递，避免 bash 变量替换带来的注入风险
+    python3 - "$config_plist" "$serial" "$mlb" "$uuid" <<'PYEOF'
+import sys, plistlib
+
+config_path, serial, mlb, uuid = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+try:
+    with open(config_path, 'rb') as f:
+        pl = plistlib.load(f)
+
+    platform_info = pl.get('PlatformInfo', {})
+    generic = platform_info.get('Generic', {})
+
+    if not isinstance(generic, dict) or not generic:
+        print("SKIP: PlatformInfo/Generic section not found or empty in config.plist")
+        sys.exit(1)
+
+    generic['SystemSerialNumber'] = serial
+    generic['MLB'] = mlb
+    generic['SystemUUID'] = uuid
+    platform_info['Generic'] = generic
+    pl['PlatformInfo'] = platform_info
+
+    with open(config_path, 'wb') as f:
+        plistlib.dump(pl, f, fmt=plistlib.FMT_XML)
+
+    print("SUCCESS: patched SystemSerialNumber=%s MLB=%s UUID=%s" % (serial, mlb, uuid))
+except Exception as e:
+    print("ERROR: %s" % e, file=sys.stderr)
+    sys.exit(1)
+PYEOF
+    ret=$?
+
+    # 卸载并释放循环设备
+    umount "$mount_point" 2>/dev/null || true
+    [ -n "$loop_dev" ] && losetup -d "$loop_dev" 2>/dev/null
+    rmdir "$mount_point" 2>/dev/null || true
+
+    if [ $ret -ne 0 ]; then
+        _yellow "config.plist 修改失败，回退到原始 opencore.iso（固定序列号兜底）"
+        rm -f "$dst_iso"
+        return 1
+    fi
+
+    _green "专属 opencore ISO 已创建：opencore_${vm_id}.iso"
+    return 0
+}
+
+# 生成 SMBIOS 数据并尝试注入 per-VM opencore ISO
+# 成功时：MACOS_SERIAL/MLB/UUID 和 MACOS_OPENCORE_ISO 均被设置
+# 失败时：MACOS_OPENCORE_ISO 回退到共享 opencore.iso（保持原有写死序列号逻辑）
+setup_macos_smbios() {
+    local serial mlb uuid
+    serial=$(generate_mac_serial)
+    mlb=$(generate_mlb)
+    uuid=$(generate_system_uuid)
+
+    _yellow "生成的 macOS SMBIOS 信息："
+    _yellow "  序列号 (SystemSerialNumber): $serial"
+    _yellow "  主板序列号 (MLB):            $mlb"
+    _yellow "  系统 UUID:                   $uuid"
+
+    if patch_opencore_iso "$vm_num" "$serial" "$mlb" "$uuid"; then
+        MACOS_SERIAL="$serial"
+        MACOS_MLB="$mlb"
+        MACOS_UUID="$uuid"
+        MACOS_OPENCORE_ISO="/var/lib/vz/template/iso/opencore_${vm_num}.iso"
+        _green "SMBIOS 已成功生成并注入专属 opencore ISO"
+    else
+        _yellow "SMBIOS 注入失败 → 使用共享 opencore.iso（固定序列号兜底，原逻辑不变）"
+        MACOS_OPENCORE_ISO="/var/lib/vz/template/iso/opencore.iso"
+    fi
 }
 
 main() {
@@ -315,6 +533,7 @@ main() {
     check_cpu_vendor
     check_kvm_support_for_macos
     check_iso_exists || exit 1
+    setup_macos_smbios
     check_ipv6_config || exit 1
     create_vm || exit 1
     configure_network
@@ -324,6 +543,11 @@ main() {
     _green "VM ID: $vm_num"
     _green "SSH端口: $sshn, VNC端口: $vnc_port"
     _green "CPU厂商: $cpu_vendor, 使用OpenCore引导和${system}系统镜像"
+    if [ -n "$MACOS_SERIAL" ]; then
+        _green "macOS SMBIOS 序列号: $MACOS_SERIAL | MLB: $MACOS_MLB | UUID: $MACOS_UUID"
+    else
+        _yellow "macOS SMBIOS: 使用 opencore.iso 内置固定序列号（生成失败兜底）"
+    fi
 }
 
 main "$@"
