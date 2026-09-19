@@ -905,13 +905,15 @@ _download_with_retry() {
     local max_attempts=5
     local attempt=1
     local wait_time=1
+    local tmp
     while ((attempt <= max_attempts)); do
-        curl -Lk --connect-timeout 10 --retry 0 -o "$output" "$url"
-        if [ $? -eq 0 ]; then
+        tmp=$(mktemp "${output}.tmp.XXXXXX") || return 1
+        if curl -fLk --connect-timeout 10 --retry 0 -o "$tmp" "$url" && [ -s "$tmp" ] && mv -f -- "$tmp" "$output"; then
             return 0
         else
+            rm -f -- "$tmp"
             _yellow "Download attempt $attempt failed. Retrying in $wait_time seconds..."
-            sleep $wait_time
+            sleep "$wait_time"
             wait_time=$((wait_time * 2))
             ((attempt++))
         fi

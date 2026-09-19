@@ -113,12 +113,20 @@ pre_check() {
     fi
     if [ ! -f "buildvm.sh" ]; then
         if [ -f "${script_dir}/buildvm.sh" ]; then
-            cp -f "${script_dir}/buildvm.sh" buildvm.sh
+            cp -f "${script_dir}/buildvm.sh" buildvm.sh || return 1
         else
-            curl -L "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/pve/main/scripts/buildvm.sh" -o buildvm.sh
+            local build_tmp
+            build_tmp=$(mktemp ./buildvm.sh.tmp.XXXXXX) || return 1
+            if ! curl -fsSL "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/pve/main/scripts/buildvm.sh" -o "$build_tmp" || [ ! -s "$build_tmp" ]; then
+                rm -f -- "$build_tmp"
+                _red "Failed to download buildvm.sh"
+                _red "下载 buildvm.sh 失败"
+                return 1
+            fi
+            mv -f -- "$build_tmp" buildvm.sh || { rm -f -- "$build_tmp"; return 1; }
         fi
-        chmod 755 buildvm.sh
-        dos2unix buildvm.sh
+        chmod 755 buildvm.sh || return 1
+        dos2unix buildvm.sh || return 1
     fi
 }
 

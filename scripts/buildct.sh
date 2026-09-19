@@ -203,10 +203,12 @@ configure_networking() {
 }
 
 change_mirrors() {
-    pct exec $CTID -- curl -lk https://gitee.com/SuperManito/LinuxMirrors/raw/main/ChangeMirrors.sh -o ChangeMirrors.sh
-    pct exec $CTID -- chmod 755 ChangeMirrors.sh
-    pct exec $CTID -- ./ChangeMirrors.sh --source mirrors.tuna.tsinghua.edu.cn --web-protocol http --intranet false --close-firewall true --backup true --updata-software false --clean-cache false --ignore-backup-tips > /dev/null
-    pct exec $CTID -- rm -rf ChangeMirrors.sh
+    pct exec "$CTID" -- rm -f ChangeMirrors.sh || return 1
+    pct exec "$CTID" -- curl -fsSL https://gitee.com/SuperManito/LinuxMirrors/raw/main/ChangeMirrors.sh -o ChangeMirrors.sh || return 1
+    pct exec "$CTID" -- test -s ChangeMirrors.sh || return 1
+    pct exec "$CTID" -- chmod 755 ChangeMirrors.sh || return 1
+    pct exec "$CTID" -- ./ChangeMirrors.sh --source mirrors.tuna.tsinghua.edu.cn --web-protocol http --intranet false --close-firewall true --backup true --updata-software false --clean-cache false --ignore-backup-tips >/dev/null || return 1
+    pct exec "$CTID" -- rm -f ChangeMirrors.sh || return 1
 }
 
 install_packages() {
@@ -219,7 +221,7 @@ install_packages() {
         if [[ "$packages" == *"curl"* ]]; then
             pct exec $CTID -- $pkg_manager install -y curl
         fi
-        change_mirrors
+        change_mirrors || return 1
         pct exec $CTID -- $pkg_manager install -y $packages
     fi
 }
@@ -227,15 +229,19 @@ install_packages() {
 setup_ssh() {
     local system_type=$1
     if echo "$system_type" | grep -qiE "alpine|archlinux|gentoo|openwrt" >/dev/null 2>&1; then
-        pct exec $CTID -- curl -L ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/pve/main/scripts/ssh_sh.sh -o ssh_sh.sh
-        pct exec $CTID -- chmod 755 ssh_sh.sh
-        pct exec $CTID -- dos2unix ssh_sh.sh
-        pct exec $CTID -- bash ssh_sh.sh
+        pct exec "$CTID" -- rm -f ssh_sh.sh || return 1
+        pct exec "$CTID" -- curl -fsSL "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/pve/main/scripts/ssh_sh.sh" -o ssh_sh.sh || return 1
+        pct exec "$CTID" -- test -s ssh_sh.sh || return 1
+        pct exec "$CTID" -- chmod 755 ssh_sh.sh || return 1
+        pct exec "$CTID" -- dos2unix ssh_sh.sh || return 1
+        pct exec "$CTID" -- bash ssh_sh.sh || return 1
     else
-        pct exec $CTID -- curl -L ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/pve/main/scripts/ssh_bash.sh -o ssh_bash.sh
-        pct exec $CTID -- chmod 755 ssh_bash.sh
-        pct exec $CTID -- dos2unix ssh_bash.sh
-        pct exec $CTID -- bash ssh_bash.sh
+        pct exec "$CTID" -- rm -f ssh_bash.sh || return 1
+        pct exec "$CTID" -- curl -fsSL "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/pve/main/scripts/ssh_bash.sh" -o ssh_bash.sh || return 1
+        pct exec "$CTID" -- test -s ssh_bash.sh || return 1
+        pct exec "$CTID" -- chmod 755 ssh_bash.sh || return 1
+        pct exec "$CTID" -- dos2unix ssh_bash.sh || return 1
+        pct exec "$CTID" -- bash ssh_bash.sh || return 1
     fi
 }
 
@@ -268,7 +274,7 @@ restart_ssh() {
 configure_os() {
     if [ "$fixed_system" = true ]; then
         if [[ "${CN}" == true ]]; then
-            change_mirrors
+            change_mirrors || return 1
         fi
         sleep 2
         check_network
@@ -276,17 +282,14 @@ configure_os() {
         restart_ssh
     else
         if echo "$system" | grep -qiE "centos|almalinux|rockylinux" >/dev/null 2>&1; then
-            install_packages "yum" "dos2unix curl"
+            install_packages "yum" "dos2unix curl" || return 1
         elif echo "$system" | grep -qiE "fedora" >/dev/null 2>&1; then
-            install_packages "dnf" "dos2unix curl"
+            install_packages "dnf" "dos2unix curl" || return 1
         elif echo "$system" | grep -qiE "opensuse" >/dev/null 2>&1; then
-            install_packages "zypper --non-interactive" "dos2unix curl"
+            install_packages "zypper --non-interactive" "dos2unix curl" || return 1
         elif echo "$system" | grep -qiE "alpine|archlinux" >/dev/null 2>&1; then
             if [[ "${CN}" == true ]]; then
-                pct exec $CTID -- wget https://gitee.com/SuperManito/LinuxMirrors/raw/main/ChangeMirrors.sh
-                pct exec $CTID -- chmod 755 ChangeMirrors.sh
-                pct exec $CTID -- ./ChangeMirrors.sh --source mirrors.tuna.tsinghua.edu.cn --web-protocol http --intranet false --close-firewall true --backup true --updata-software false --clean-cache false --ignore-backup-tips > /dev/null
-                pct exec $CTID -- rm -rf ChangeMirrors.sh
+                change_mirrors || return 1
             fi
         elif echo "$system" | grep -qiE "ubuntu|debian|devuan" >/dev/null 2>&1; then
             if [[ -z "${CN}" || "${CN}" != true ]]; then
@@ -296,11 +299,11 @@ configure_os() {
                 pct exec $CTID -- apt-get install dos2unix curl -y
             else
                 pct exec $CTID -- apt-get install curl -y --fix-missing
-                change_mirrors
+                change_mirrors || return 1
                 pct exec $CTID -- apt-get install dos2unix -y
             fi
         fi
-        setup_ssh "$system"
+        setup_ssh "$system" || return 1
     fi
 }
 
@@ -372,7 +375,7 @@ main() {
     prepare_system_image || exit 1
     create_container
     configure_networking
-    configure_os
+    configure_os || exit 1
     configure_container_extras
     setup_port_forwarding
     save_container_info

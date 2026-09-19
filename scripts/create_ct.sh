@@ -113,12 +113,20 @@ pre_check() {
     fi
     if [ ! -f "buildct.sh" ]; then
         if [ -f "${script_dir}/buildct.sh" ]; then
-            cp -f "${script_dir}/buildct.sh" buildct.sh
+            cp -f "${script_dir}/buildct.sh" buildct.sh || return 1
         else
-            curl -L "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/pve/main/scripts/buildct.sh" -o buildct.sh
+            local build_tmp
+            build_tmp=$(mktemp ./buildct.sh.tmp.XXXXXX) || return 1
+            if ! curl -fsSL "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/pve/main/scripts/buildct.sh" -o "$build_tmp" || [ ! -s "$build_tmp" ]; then
+                rm -f -- "$build_tmp"
+                _red "Failed to download buildct.sh"
+                _red "下载 buildct.sh 失败"
+                return 1
+            fi
+            mv -f -- "$build_tmp" buildct.sh || { rm -f -- "$build_tmp"; return 1; }
         fi
-        chmod 755 buildct.sh
-        dos2unix buildct.sh
+        chmod 755 buildct.sh || return 1
+        dos2unix buildct.sh || return 1
     fi
 }
 

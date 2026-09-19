@@ -28,12 +28,19 @@ fi
 shellcheck -S error "${shell_files[@]}"
 shellcheck -s sh -S error ./scripts/ssh_sh.sh
 
-# Systemd units that execute downloaded scripts must retain the explicit mode
-# hardening in the installer.  These checks prevent a future regression where
-# wget leaves an ExecStart script non-executable.
-grep -Fq 'chmod 755 /usr/local/bin/install_ifupdown2.sh' ./scripts/install_pve.sh
-grep -Fq 'chmod 755 /usr/local/bin/check-dns.sh' ./scripts/install_pve.sh
-grep -Fq 'chmod 755 /usr/local/bin/clear_interface_route_cache.sh' ./scripts/install_pve.sh
+# Systemd units that execute downloaded scripts must use the atomic downloader
+# and explicit mode hardening. These checks prevent a truncated wget target
+# from being mistaken for an installed service on the next run.
+grep -Fq 'download_required_file' ./scripts/install_pve.sh
+grep -Fq 'download_required_file "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/pve/main/extra_scripts/install_ifupdown2.sh" /usr/local/bin/install_ifupdown2.sh 755' ./scripts/install_pve.sh
+grep -Fq 'download_required_file "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/pve/main/extra_scripts/check-dns.sh" /usr/local/bin/check-dns.sh 755' ./scripts/install_pve.sh
+grep -Fq 'download_required_file "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/pve/main/extra_scripts/clear_interface_route_cache.sh" /usr/local/bin/clear_interface_route_cache.sh 755' ./scripts/install_pve.sh
+grep -Fq 'curl -fsSL "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/pve/main/scripts/buildct.sh"' ./scripts/create_ct.sh
+grep -Fq 'curl -fsSL "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/pve/main/scripts/buildvm.sh"' ./scripts/create_vm.sh
+grep -Fq 'pct exec "$CTID" -- curl -fsSL' ./scripts/buildct.sh
+grep -Fq 'pct exec "$CTID" -- test -s ssh_bash.sh' ./scripts/buildct.sh
+grep -Fq 'pct exec "$CTID" -- curl -fsSL' ./scripts/buildct_onlyv6.sh
+grep -Fq 'pct exec "$CTID" -- test -s ssh_bash.sh' ./scripts/buildct_onlyv6.sh
 grep -Fq 'TimeoutStartSec=30min' ./extra_scripts/ifupdown2-install.service
 
 printf 'static shell inventory passed (%s scripts)\n' "${#shell_files[@]}"

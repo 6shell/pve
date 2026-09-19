@@ -659,8 +659,14 @@ setup_persistent_net_link() {
 detect_he_tunnel() {
     status_he=false
     if grep -q "he-ipv6" /etc/network/interfaces; then
-        wget ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/6in4/main/covert.sh -O /root/covert.sh
-        chmod 755 /root/covert.sh
+        local covert_tmp
+        covert_tmp=$(mktemp /root/covert.sh.tmp.XXXXXX) || return 1
+        if ! wget "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/6in4/main/covert.sh" -O "$covert_tmp" || [ ! -s "$covert_tmp" ] || ! chmod 755 "$covert_tmp" || ! mv -f -- "$covert_tmp" /root/covert.sh; then
+            rm -f -- "$covert_tmp"
+            _red "Failed to download HE tunnel helper"
+            _red "下载 HE 隧道辅助脚本失败"
+            return 1
+        fi
         /root/covert.sh
         sleep 1
         status_he=true

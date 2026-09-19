@@ -920,12 +920,22 @@ check_cdn_file() {
     fi
 }
 
+# Download auxiliary units atomically.  A failed wget may still leave a
+# truncated target; treating that file as installed on the next run can leave
+# a node with a broken boot service and no retry path.
+download_required_file() {
+    local url="$1" target="$2" mode="${3:-644}" tmp
+    tmp=$(mktemp "${target}.tmp.XXXXXX") || return 1
+    if ! wget "$url" -O "$tmp" || [ ! -s "$tmp" ] || ! chmod "$mode" "$tmp" || ! mv -f -- "$tmp" "$target"; then
+        rm -f -- "$tmp"
+        return 1
+    fi
+}
+
 prebuild_ifupdown2() {
     if [ ! -f "/usr/local/bin/ifupdown2_installed.txt" ]; then
-        wget ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/pve/main/extra_scripts/install_ifupdown2.sh -O /usr/local/bin/install_ifupdown2.sh
-        wget ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/pve/main/extra_scripts/ifupdown2-install.service -O /etc/systemd/system/ifupdown2-install.service
-        chmod 755 /usr/local/bin/install_ifupdown2.sh
-        chmod 644 /etc/systemd/system/ifupdown2-install.service
+        download_required_file "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/pve/main/extra_scripts/install_ifupdown2.sh" /usr/local/bin/install_ifupdown2.sh 755 || return 1
+        download_required_file "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/pve/main/extra_scripts/ifupdown2-install.service" /etc/systemd/system/ifupdown2-install.service 644 || return 1
         if [ -f "/usr/local/bin/install_ifupdown2.sh" ]; then
             # _green "This script will automatically reboot the system after 5 seconds, please wait a few minutes to log into SSH and execute this script again"
             # _green "本脚本将在5秒后自动重启系统，请待几分钟后退出SSH再次执行本脚本"
@@ -1166,10 +1176,8 @@ check_and_configure_environment() {
 # 设置DNS检查服务
 setup_dns_check_service() {
     if [ ! -f "/usr/local/bin/check-dns.sh" ]; then
-        wget ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/pve/main/extra_scripts/check-dns.sh -O /usr/local/bin/check-dns.sh
-        wget ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/pve/main/extra_scripts/check-dns.service -O /etc/systemd/system/check-dns.service
-        chmod 755 /usr/local/bin/check-dns.sh
-        chmod 644 /etc/systemd/system/check-dns.service
+        download_required_file "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/pve/main/extra_scripts/check-dns.sh" /usr/local/bin/check-dns.sh 755 || return 1
+        download_required_file "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/pve/main/extra_scripts/check-dns.service" /etc/systemd/system/check-dns.service 644 || return 1
         systemctl daemon-reload
         systemctl enable check-dns.service
         systemctl start check-dns.service
@@ -1347,10 +1355,8 @@ restart_network_service() {
 # 设置接口路由缓存清理
 setup_interface_route_cache_cleaner() {
     if [ ! -f "/usr/local/bin/clear_interface_route_cache.sh" ]; then
-        wget ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/pve/main/extra_scripts/clear_interface_route_cache.sh -O /usr/local/bin/clear_interface_route_cache.sh
-        wget ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/pve/main/extra_scripts/clear_interface_route_cache.service -O /etc/systemd/system/clear_interface_route_cache.service
-        chmod 755 /usr/local/bin/clear_interface_route_cache.sh
-        chmod 644 /etc/systemd/system/clear_interface_route_cache.service
+        download_required_file "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/pve/main/extra_scripts/clear_interface_route_cache.sh" /usr/local/bin/clear_interface_route_cache.sh 755 || return 1
+        download_required_file "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/pve/main/extra_scripts/clear_interface_route_cache.service" /etc/systemd/system/clear_interface_route_cache.service 644 || return 1
         systemctl daemon-reload
         systemctl enable clear_interface_route_cache.service
         _green "An anomaly was detected with the routing conflict, perform a reboot to reboot the machine to start the repaired daemon and try the installation again."

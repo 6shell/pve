@@ -134,10 +134,12 @@ get_ipv6_info() {
 }
 
 setup_mirrors_for_cn() {
-    pct exec $CTID -- curl -lk https://gitee.com/SuperManito/LinuxMirrors/raw/main/ChangeMirrors.sh -o ChangeMirrors.sh
-    pct exec $CTID -- chmod 755 ChangeMirrors.sh
-    pct exec $CTID -- ./ChangeMirrors.sh --source mirrors.tuna.tsinghua.edu.cn --web-protocol http --intranet false --close-firewall true --backup true --updata-software false --clean-cache false --ignore-backup-tips > /dev/null
-    pct exec $CTID -- rm -rf ChangeMirrors.sh
+    pct exec "$CTID" -- rm -f ChangeMirrors.sh || return 1
+    pct exec "$CTID" -- curl -fsSL https://gitee.com/SuperManito/LinuxMirrors/raw/main/ChangeMirrors.sh -o ChangeMirrors.sh || return 1
+    pct exec "$CTID" -- test -s ChangeMirrors.sh || return 1
+    pct exec "$CTID" -- chmod 755 ChangeMirrors.sh || return 1
+    pct exec "$CTID" -- ./ChangeMirrors.sh --source mirrors.tuna.tsinghua.edu.cn --web-protocol http --intranet false --close-firewall true --backup true --updata-software false --clean-cache false --ignore-backup-tips >/dev/null || return 1
+    pct exec "$CTID" -- rm -f ChangeMirrors.sh || return 1
 }
 
 setup_container_os() {
@@ -145,7 +147,7 @@ setup_container_os() {
         if [[ -z "${CN}" || "${CN}" != true ]]; then
             sleep 1
         else
-            setup_mirrors_for_cn
+            setup_mirrors_for_cn || return 1
         fi
         sleep 2
         public_network_check_res=$(pct exec $CTID -- curl -lk -m 6 ${cdn_success_url}https://raw.githubusercontent.com/spiritLHLS/ecs/main/back/test)
@@ -176,7 +178,7 @@ setup_container_os() {
                 pct exec $CTID -- yum install -y dos2unix curl
             else
                 pct exec $CTID -- yum install -y curl
-                setup_mirrors_for_cn
+                setup_mirrors_for_cn || return 1
                 pct exec $CTID -- yum install -y dos2unix
             fi
         elif echo "$system" | grep -qiE "fedora" >/dev/null 2>&1; then
@@ -185,7 +187,7 @@ setup_container_os() {
                 pct exec $CTID -- dnf install -y dos2unix curl
             else
                 pct exec $CTID -- dnf install -y curl
-                setup_mirrors_for_cn
+                setup_mirrors_for_cn || return 1
                 pct exec $CTID -- dnf install -y dos2unix
             fi
         elif echo "$system" | grep -qiE "opensuse" >/dev/null 2>&1; then
@@ -194,17 +196,14 @@ setup_container_os() {
                 pct exec $CTID -- zypper --non-interactive install dos2unix curl
             else
                 pct exec $CTID -- zypper --non-interactive install curl
-                setup_mirrors_for_cn
+                setup_mirrors_for_cn || return 1
                 pct exec $CTID -- zypper --non-interactive install dos2unix
             fi
         elif echo "$system" | grep -qiE "alpine|archlinux" >/dev/null 2>&1; then
             if [[ -z "${CN}" || "${CN}" != true ]]; then
                 sleep 1
             else
-                pct exec $CTID -- wget https://gitee.com/SuperManito/LinuxMirrors/raw/main/ChangeMirrors.sh
-                pct exec $CTID -- chmod 755 ChangeMirrors.sh
-                pct exec $CTID -- ./ChangeMirrors.sh --source mirrors.tuna.tsinghua.edu.cn --web-protocol http --intranet false --close-firewall true --backup true --updata-software false --clean-cache false --ignore-backup-tips > /dev/null
-                pct exec $CTID -- rm -rf ChangeMirrors.sh
+                setup_mirrors_for_cn || return 1
             fi
         elif echo "$system" | grep -qiE "ubuntu|debian|devuan" >/dev/null 2>&1; then
             if [[ -z "${CN}" || "${CN}" != true ]]; then
@@ -214,20 +213,24 @@ setup_container_os() {
                 pct exec $CTID -- apt-get install dos2unix curl -y
             else
                 pct exec $CTID -- apt-get install curl -y --fix-missing
-                setup_mirrors_for_cn
+                setup_mirrors_for_cn || return 1
                 pct exec $CTID -- apt-get install dos2unix -y
             fi
         fi
         if echo "$system" | grep -qiE "alpine|archlinux|gentoo|openwrt" >/dev/null 2>&1; then
-            pct exec $CTID -- curl -L ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/pve/main/scripts/ssh_sh.sh -o ssh_sh.sh
-            pct exec $CTID -- chmod 755 ssh_sh.sh
-            pct exec $CTID -- dos2unix ssh_sh.sh
-            pct exec $CTID -- bash ssh_sh.sh
+            pct exec "$CTID" -- rm -f ssh_sh.sh || return 1
+            pct exec "$CTID" -- curl -fsSL "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/pve/main/scripts/ssh_sh.sh" -o ssh_sh.sh || return 1
+            pct exec "$CTID" -- test -s ssh_sh.sh || return 1
+            pct exec "$CTID" -- chmod 755 ssh_sh.sh || return 1
+            pct exec "$CTID" -- dos2unix ssh_sh.sh || return 1
+            pct exec "$CTID" -- bash ssh_sh.sh || return 1
         else
-            pct exec $CTID -- curl -L ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/pve/main/scripts/ssh_bash.sh -o ssh_bash.sh
-            pct exec $CTID -- chmod 755 ssh_bash.sh
-            pct exec $CTID -- dos2unix ssh_bash.sh
-            pct exec $CTID -- bash ssh_bash.sh
+            pct exec "$CTID" -- rm -f ssh_bash.sh || return 1
+            pct exec "$CTID" -- curl -fsSL "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/pve/main/scripts/ssh_bash.sh" -o ssh_bash.sh || return 1
+            pct exec "$CTID" -- test -s ssh_bash.sh || return 1
+            pct exec "$CTID" -- chmod 755 ssh_bash.sh || return 1
+            pct exec "$CTID" -- dos2unix ssh_bash.sh || return 1
+            pct exec "$CTID" -- bash ssh_bash.sh || return 1
         fi
     fi
 }
@@ -354,7 +357,7 @@ main() {
     get_ipv6_info
     prepare_system_image || exit 1
     create_container
-    setup_container_os
+    setup_container_os || exit 1
     finalize_container
     save_container_info
 }
